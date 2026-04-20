@@ -6,80 +6,44 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
-func HandleInstall(r GithubRelease, installPath string, httpClient *http.Client) error {
-	ARCH := getArch()
-	binaryPath := (filepath.Join(*InstallPath, FILE_NAME_UNIX))
+const FILE_NAME = "rust-analyzer"
 
-	var err error
-	var asset Asset
-	switch ARCH {
+func getAsset(r GithubRelease, systemInfo OS) (Asset, error) {
+	if systemInfo.Platform == "darwin" {
+		systemInfo.Platform = "apple"
+	}
+
+	var arch, abi string
+	switch systemInfo.Arch {
 	case "amd64":
 		{
-			asset, err = r.GetMatchingTripleAsset("x86_64", "linux", "gnu")
-			if err != nil {
-				return err
-			}
+			arch, abi = "x86_64", "gnu"
+		}
+	case "arm64":
+		{
+			arch, abi = "aarch64", "gnu"
+		}
+	case "arm":
+		{
+			arch, abi = "arm", "gnueabihf"
 		}
 	default:
-		return fmt.Errorf("architecture %s is not supported yet", ARCH)
+		return Asset{}, fmt.Errorf("architecture %s is not supported yet", systemInfo.Arch)
 	}
 
-	tempFile, err := os.CreateTemp(*InstallPath, asset.File.Name)
+	if systemInfo.Platform == "apple" {
+		abi = "darwin"
+	}
+
+	asset, err := r.GetMatchingTripleAsset(arch, systemInfo.Platform, abi)
 	if err != nil {
-		return err
-	}
-	defer os.Remove(tempFile.Name())
-
-	if err := downloadFile(asset.DownloadURL, tempFile, httpClient); err != nil {
-		return err
+		return Asset{}, err
 	}
 
-	if ok, err := verifySHA256Sum(tempFile, strings.TrimPrefix(asset.Digest, "sha256:")); err != nil {
-		return fmt.Errorf("failed to verify czechsum: %w", err)
-	} else if !ok {
-		return fmt.Errorf("corrupt download")
-	} else {
-		fmt.Println("Verified czechsum")
-	}
-
-	extractedFile, err := os.CreateTemp(*InstallPath, FILE_NAME_UNIX)
-	if err != nil {
-		return fmt.Errorf("unable to create temp file: %w", err)
-	}
-	defer os.Remove(extractedFile.Name())
-
-	if err := uncompress(tempFile, extractedFile); err != nil {
-		return err
-	}
-
-	tempFile.Close()
-	extractedFile.Close()
-
-	if err := setExectuableUnix(extractedFile.Name()); err != nil {
-		return err
-	}
-
-	if err := os.Rename(extractedFile.Name(), binaryPath); err != nil {
-		return fmt.Errorf("cannot move new version to destination: %w", err)
-	}
-
-	fmt.Println("Installed at:", binaryPath)
-	return nil
-}
-
-func setExectuableUnix(path string) error {
-	fmt.Println("Setting executable permission")
-	if err := os.Chmod(path, 0o755); err != nil {
-		return fmt.Errorf("cannot set executable permission: %w", err)
-	}
-
-	return nil
+	return asset, nil
 }
 
 func uncompress(file *os.File, destinationFile *os.File) error {

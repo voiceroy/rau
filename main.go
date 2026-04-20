@@ -21,7 +21,6 @@ const (
 	REPO_OWNER         = "rust-lang"
 	REPO               = "rust-analyzer"
 	API_URL            = "https://api.github.com/repos/" + REPO_OWNER + "/" + REPO + "/releases/tags/"
-	FILE_NAME_UNIX     = "rust-analyzer"
 	MANIFEST_FILE_NAME = "rust-analyzer.version"
 )
 
@@ -35,6 +34,10 @@ var (
 	Timeout     = flag.Duration("timeout", 30*time.Second, "Timeout in seconds")
 	AuthToken   = flag.String("authtoken", "", "Auth token to bypass default ratelimit")
 )
+
+type OS struct {
+	Platform, Arch string
+}
 
 type Manifest struct {
 	CommitHash  string
@@ -156,10 +159,54 @@ func (f *File) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func getArch() string {
-	arch := runtime.GOARCH
-	fmt.Println("Detected Arch:", arch)
-	return arch
+func HandleInstall(r GithubRelease, systemInfo OS, installPath string, httpClient *http.Client) error {
+	asset, err := getAsset(r, systemInfo)
+	if err != nil {
+		return err
+	}
+
+	binaryPath := (filepath.Join(*InstallPath, FILE_NAME))
+	tempFile, err := os.CreateTemp(*InstallPath, asset.File.Name)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tempFile.Name())
+
+	if err := downloadFile(asset.DownloadURL, tempFile, httpClient); err != nil {
+		return err
+	}
+
+	if ok, err := verifySHA256Sum(tempFile, strings.TrimPrefix(asset.Digest, "sha256:")); err != nil {
+		return fmt.Errorf("failed to verify czechsum: %w", err)
+	} else if !ok {
+		return fmt.Errorf("corrupt download")
+	} else {
+		fmt.Println("Verified czechsum")
+	}
+
+	extractedFile, err := os.CreateTemp(*InstallPath, FILE_NAME)
+	if err != nil {
+		return fmt.Errorf("unable to create temp file: %w", err)
+	}
+	defer os.Remove(extractedFile.Name())
+
+	if err := uncompress(tempFile, extractedFile); err != nil {
+		return err
+	}
+
+	tempFile.Close()
+	extractedFile.Close()
+
+	if err := setExectuable(extractedFile.Name()); err != nil {
+		return err
+	}
+
+	if err := os.Rename(extractedFile.Name(), binaryPath); err != nil {
+		return fmt.Errorf("cannot move new version to destination: %w", err)
+	}
+
+	fmt.Println("Installed at:", binaryPath)
+	return nil
 }
 
 func verifySHA256Sum(file *os.File, sum string) (bool, error) {
@@ -200,6 +247,15 @@ func downloadFile(url string, file *os.File, client *http.Client) error {
 	_, err = io.Copy(file, resp.Body)
 	if err != nil {
 		return fmt.Errorf("http error: %w", err)
+	}
+
+	return nil
+}
+
+func setExectuable(path string) error {
+	fmt.Println("Setting executable permission")
+	if err := os.Chmod(path, 0o755); err != nil {
+		return fmt.Errorf("cannot set executable permission: %w", err)
 	}
 
 	return nil
@@ -275,12 +331,17 @@ func main() {
 		return
 	}
 
-	if m.CommitHash != releaseResponse.CommitHash {
+	if m.TagName == releaseResponse.TagName && m.CommitHash != releaseResponse.CommitHash {
 		fmt.Println("Remote commit hash for the release", *Release, "differs, installing to match to the new commit hash")
 	}
 
+	systemInfo := OS{
+		Platform: runtime.GOOS,
+		Arch:     runtime.GOARCH,
+	}
+
 	if releaseResponse.TagName == *Release {
-		if err := HandleInstall(releaseResponse, *InstallPath, httpClient); err != nil {
+		if err := HandleInstall(releaseResponse, systemInfo, *InstallPath, httpClient); err != nil {
 			fmt.Println("Install failed with error: ", err.Error())
 		}
 
